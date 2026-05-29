@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -36,8 +36,25 @@ ctx.imageSmoothingEnabled = false;
 
 // === SPRITES ===
 const SPR = {};
+const SPR_HB = {};
 let loaded = 0;
 const TOTAL = 4;
+
+function spriteBounds(c){
+  const w=c.width,h=c.height;
+  const d=c.getContext('2d').getImageData(0,0,w,h).data;
+  let l=w,t=h,r=0,b=0,found=false;
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      if(d[(y*w+x)*4+3]>8){
+        found=true;
+        if(x<l)l=x;if(x>r)r=x;if(y<t)t=y;if(y>b)b=y;
+      }
+    }
+  }
+  if(!found)return{l:0,t:0,r:w,b:h};
+  return{l,t,r:r+1,b:b+1};
+}
 
 function pre(sheet,name,sx,sy,sw,sh,sc){
   const c=document.createElement('canvas');
@@ -46,6 +63,91 @@ function pre(sheet,name,sx,sy,sw,sh,sc){
   cx.imageSmoothingEnabled=false;
   cx.drawImage(sheet,sx,sy,sw,sh,0,0,c.width,c.height);
   SPR[name]=c;
+}
+
+// Fallback hitboxes if alpha scan is blocked (e.g. file://)
+const OB_HB_FB={
+  sawa:{l:8,t:11,r:30,b:28},sawb:{l:8,t:11,r:30,b:28},
+  slimea:{l:6,t:16,r:32,b:36},slimeb:{l:6,t:16,r:32,b:36},
+  beea:{l:10,t:8,r:28,b:26},beeb:{l:10,t:8,r:28,b:26},
+  flya:{l:9,t:10,r:29,b:28},flyb:{l:9,t:10,r:29,b:28},
+};
+const PL_HB_FB={
+  pidle:{l:26,t:24,r:52,b:74},pwa:{l:26,t:24,r:52,b:74},pwb:{l:26,t:24,r:52,b:74},
+  pjump:{l:24,t:12,r:54,b:74},pduck:{l:22,t:38,r:56,b:74},
+};
+const ENEMY_SPR=Object.keys(OB_HB_FB);
+const PLAYER_SPR=Object.keys(PL_HB_FB);
+
+function hbFromSprite(name,fb){
+  const c=SPR[name];
+  if(!c)return fb;
+  try{
+    const hb=spriteBounds(c);
+    return(hb.r>hb.l+1&&hb.b>hb.t+1)?hb:fb;
+  }catch(e){return fb;}
+}
+
+function buildHitboxes(){
+  for(const n of ENEMY_SPR)SPR_HB[n]=hbFromSprite(n,OB_HB_FB[n]);
+  for(const n of PLAYER_SPR)SPR_HB[n]=hbFromSprite(n,PL_HB_FB[n]);
+}
+
+function hbWorld(x,y,hb){return{l:x+hb.l,t:y+hb.t,r:x+hb.r,b:y+hb.b};}
+
+function playerSpriteKey(p){
+  if(!p.gnd)return'pjump';
+  if(p.duck)return'pduck';
+  return p.af===0?'pwa':'pwb';
+}
+
+function playerDrawY(p){return p.duck?p.y+CH*0.25:p.y;}
+
+function playerHitbox(p){
+  const hb=SPR_HB[playerSpriteKey(p)]||PL_HB_FB.pwa;
+  return hbWorld(PLAYER_X,playerDrawY(p),hb);
+}
+
+function obsHitbox(o){
+  const hb=SPR_HB[o.tp+(o.af===0?'a':'b')]||OB_HB_FB[o.tp+'a'];
+  return hbWorld(o.x,o.y,hb);
+}
+
+function overlap(a,b){
+  return a.l<b.r&&a.r>b.l&&a.t<b.b&&a.b>b.t;
+}
+
+function offScreenLeft(rightEdge){
+  return rightEdge<0;
+}
+
+// Ground chunks (world tile index) — spawn ahead, cull fully past left edge
+const GROUND_BUF_AHEAD=2;
+
+function groundScreenX(g,idx){
+  return idx*TW-g.px;
+}
+
+function pruneGroundChunks(g){
+  // drop when tile is completely left of x=0: idx*TW + TW <= g.px
+  const minKeep=Math.max(0,Math.floor((g.px-TW)/TW)+1);
+  for(let i=g.ground.length-1;i>=0;i--){
+    if(g.ground[i].idx<minKeep)g.ground.splice(i,1);
+  }
+}
+
+function ensureGroundChunks(g){
+  const minIdx=Math.max(0,Math.floor((g.px-TW)/TW)+1);
+  const maxIdx=Math.ceil((g.px+W)/TW)+GROUND_BUF_AHEAD;
+  const have=new Set(g.ground.map(c=>c.idx));
+  for(let idx=minIdx;idx<=maxIdx;idx++){
+    if(!have.has(idx))g.ground.push({idx});
+  }
+}
+
+function syncGroundChunks(g){
+  pruneGroundChunks(g);
+  ensureGroundChunks(g);
 }
 
 function loadSheet(n){
@@ -110,7 +212,7 @@ function newGame(){
     newRecord:false,
     px:0,bx:0,flash:0,
     pl:{y:GROUND_Y-CH,vy:0,duck:false,gnd:true,at:0,af:0},
-    obs:[],coins:[],dust:[],
+    obs:[],coins:[],dust:[],ground:[],
     spT:0,cnT:0,dfT:0,duT:0,
     warnT:0,warnY:0,
     combo:0,lastScore:0,
@@ -142,6 +244,7 @@ function update(g,dt){
   // Scroll
   g.px+=delta;
   g.bx+=delta*0.2;
+  syncGroundChunks(g);
 
   // Dust particles when running
   g.duT-=dt;
@@ -158,7 +261,7 @@ function update(g,dt){
   for(let i=g.dust.length-1;i>=0;i--){
     const d=g.dust[i];
     d.x+=d.vx*dt;d.y+=d.vy*dt;d.vy+=0.5;d.l-=dt;
-    if(d.l<=0)g.dust.splice(i,1);
+    if(d.l<=0||offScreenLeft(d.x+(d.s|0)))g.dust.splice(i,1);
   }
 
   // Score check for new record
@@ -197,33 +300,30 @@ function update(g,dt){
     if(!overlap)g.coins.push({x:W+10,y:cy,at:0,fr:0});
   }
 
-  // Move obstacles
+  // Move obstacles — remove only when fully off the left edge
   for(let i=g.obs.length-1;i>=0;i--){
     const o=g.obs[i];o.x-=delta;o.at+=dt;
     if(o.at>o.asp){o.at=0;o.af=(o.af+1)%2;}
-    if(o.x+OW<0)g.obs.splice(i,1);
+    if(offScreenLeft(obsHitbox(o).r))g.obs.splice(i,1);
   }
 
   // Move coins
   for(let i=g.coins.length-1;i>=0;i--){
     const c=g.coins[i];c.x-=delta;c.at+=dt;
     if(c.at>0.25){c.at=0;c.fr=(c.fr+1)%2;}
-    if(c.x+TW<0)g.coins.splice(i,1);
+    if(offScreenLeft(c.x+TW))g.coins.splice(i,1);
   }
 
-  // Collision - obstacles
-  const pxl=PLAYER_X+6,pxr=PLAYER_X+CW-10;
-  const pyt=p.duck?p.y+CH*0.5:p.y+8,pyb=pyt+(p.duck?CH*0.45:CH-14);
-  for(const o of g.obs){
-    if(pxl<o.x+OW-6&&pxr>o.x+6&&pyt<o.y+OH-6&&pyb>o.y+6){
-      over(g);return;
+  // Collision - obstacles & coins (sprite alpha hitboxes)
+    const phb=playerHitbox(p);
+    for(const o of g.obs){
+      if(overlap(phb,obsHitbox(o))){over(g);return;}
     }
-  }
 
   // Collision - coins
   for(let i=g.coins.length-1;i>=0;i--){
     const c=g.coins[i];
-    if(pxl<c.x+TW-6&&pxr>c.x+6&&pyt<c.y+TH-6&&pyb>c.y+6){
+    if(phb.l<c.x+TW-6&&phb.r>c.x+6&&phb.t<c.y+TH-6&&phb.b>c.y+6){
       g.score+=10;sfx('coin');g.coins.splice(i,1);
     }
   }
@@ -285,15 +385,13 @@ function draw(g){
   ctx.fillStyle='rgba(0,0,0,0.15)';
   ctx.fillRect(0,GROUND_Y,W,3);
 
-  // Ground tiles
-  const ph=pm(-Math.floor(g.px),TW);
-  const tn=Math.ceil(W/TW)+2;
-  for(let i=0;i<tn;i++){
-    const x=i*TW+ph;
-    if(x+TW>0&&x<W){
-      ctx.drawImage(SPR.gtop,x,GROUND_Y,TW,TH);
-      ctx.drawImage(SPR.gmid,x,GROUND_Y+TH,TW,TH);
-    }
+  // Ground tiles (chunk list — culled behind the screen)
+  syncGroundChunks(g);
+  for(const ch of g.ground){
+    const x=groundScreenX(g,ch.idx);
+    if(x+TW<0||x>W)continue;
+    ctx.drawImage(SPR.gtop,x,GROUND_Y,TW,TH);
+    ctx.drawImage(SPR.gmid,x,GROUND_Y+TH,TW,TH);
   }
   ctx.fillStyle='#4a3728';ctx.fillRect(0,GROUND_Y+TH*2,W,H-GROUND_Y-TH*2);
 
@@ -460,13 +558,19 @@ function loop(t){
   if(g){update(g,dt);draw(g);}
   requestAnimationFrame(loop);
 }
-function start(){g=newGame();requestAnimationFrame(loop);}
+function start(){
+  buildHitboxes();
+  g=newGame();
+  syncGroundChunks(g);
+  requestAnimationFrame(loop);
+}
 
 // === INPUT ===
 function jump(){
   if(!g)return;
   if(g.over){
     g=newGame();g.started=true;g.pl.gnd=false;g.pl.vy=JUMP_VEL;
+    syncGroundChunks(g);
     sfx('jump');
     return;
   }
